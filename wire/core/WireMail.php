@@ -239,10 +239,14 @@ class WireMail extends WireData implements WireMailInterface {
 	 *
 	 * @param string $email
 	 * @param string $name
+	 * @param string $hdr Needed to put rfc conformant line breaks at the correct spot
+	 * @param string $lineSep Optinally provide a line separator other than "\r\n",
+	 *               This is needed because bundleEmailAndName is called for $to after
+	 *               user defined linebreaks have already been applied.
 	 * @return string
 	 *
 	 */
-	protected function bundleEmailAndName($email, $name, $hdr) {
+	protected function bundleEmailAndName($email, $name, $hdr, $lineSep = "\r\n") {
 		$email = $this->sanitizeEmail($email); 
 		if(!strlen($name)) return $email;
 		$name = $this->sanitizeHeaderValue($name); 
@@ -250,16 +254,22 @@ class WireMail extends WireData implements WireMailInterface {
 			// name contains a comma, so quote the value
 			$name = str_replace('"', '', $name); // remove existing quotes
 		}
+		if($name) {
+			$delim = '"';
+		}
 		// Encode the name part as quoted printable according to rfc2047
 		//return $delim . $this->quotedPrintableString($name) . $delim . " <$email>";
 		$nameLines = $this->encodeRfc2822Header($hdr, $name, false);
 		$idx = count($nameLines) - 1;
+		$nameLines[0] = $delim . $nameLines[0];
+		$nameLines[$idx] .= $delim;
 		if(strlen($nameLines[$idx]) + strlen($email) + 3 > 74) {
 			$nameLines[] = " <$email>";
 		} else {
 			$nameLines[$idx] .= " <$email>";
 		}
-		return implode("\r\n", $nameLines);
+
+		return implode($lineSep, $nameLines);
 	}
 
 	/**
@@ -599,6 +609,9 @@ class WireMail extends WireData implements WireMailInterface {
 		if(is_string($newline) && strlen($newline) && $newline !== "\r\n") {
 			$body = str_replace("\r\n", $newline, $body);
 			$header = str_replace("\r\n", $newline, $header);
+			$lineSep = $newline;
+		} else {
+			$lineSep = "\r\n";
 		}
 		
 		// prep any additional PHP mail params
@@ -614,7 +627,7 @@ class WireMail extends WireData implements WireMailInterface {
 		
 		foreach($this->to as $to) {
 			$toName = isset($this->mail['toName'][$to]) ? $this->mail['toName'][$to] : '';
-			if($toName) $to = $this->bundleEmailAndName($to, $toName, 'To'); // bundle to "User Name <user@example.com>"
+			if($toName) $to = $this->bundleEmailAndName($to, $toName, 'To', $lineSep); // bundle to "User Name <user@example.com>"
 			if($param) {
 				if(@mail($to, $subject, $body, $header, $param)) $numSent++;
 			} else {
@@ -855,7 +868,7 @@ class WireMail extends WireData implements WireMailInterface {
 		if(extension_loaded("mbstring")) {
 			// Need to pass in the header name and subtract it afterwards,
 			// otherwise the first line would grow too long
-			$hdr = mb_substr(mb_encode_mimeheader("$hdrname: $text", 'UTF-8', 'Q', "\r\n", 5), strlen($hdrname)  + 2);
+			$hdr = mb_substr(mb_encode_mimeheader("$hdrname: $text", 'UTF-8', 'Q', "\r\n"), strlen($hdrname)  + 2);
 			return $asString ? $hdr : explode("\r\n", $hdr);
 		}
 
@@ -864,8 +877,8 @@ class WireMail extends WireData implements WireMailInterface {
 		$n = 0;
 
 		while(strlen($text) > 0 && ++$n < 50) {
-			$part = $this->findBestEncodePart($subject, 63, $isFirst);
-			$out[] = $this->quotedPrintableString($part);
+			$part = $this->findBestEncodePart($text, 63, $isFirst);
+			$out[] = ($isFirst ? '' : ' ') . $this->quotedPrintableString($part);
 			$text = substr($text, strlen($part));
 			$isFirst = false;
 		}
