@@ -242,18 +242,24 @@ class WireMail extends WireData implements WireMailInterface {
 	 * @return string
 	 *
 	 */
-	protected function bundleEmailAndName($email, $name) {
+	protected function bundleEmailAndName($email, $name, $hdr) {
 		$email = $this->sanitizeEmail($email); 
 		if(!strlen($name)) return $email;
 		$name = $this->sanitizeHeaderValue($name); 
-		$delim = '';
 		if(strpos($name, ',') !== false) {
 			// name contains a comma, so quote the value
 			$name = str_replace('"', '', $name); // remove existing quotes
-			$delim = '"';  // add quotes
 		}
 		// Encode the name part as quoted printable according to rfc2047
-		return $delim . $this->quotedPrintableString($name) . $delim . " <$email>";
+		//return $delim . $this->quotedPrintableString($name) . $delim . " <$email>";
+		$nameLines = $this->encodeRfc2822Header($hdr, $name, false);
+		$idx = count($nameLines) - 1;
+		if(strlen($nameLines[$idx]) + strlen($email) + 3 > 74) {
+			$nameLines[] = " <$email>";
+		} else {
+			$nameLines[$idx] .= " <$email>";
+		}
+		return implode("\r\n", $nameLines);
 	}
 
 	/**
@@ -385,11 +391,8 @@ class WireMail extends WireData implements WireMailInterface {
 		} else {
 			$email = $this->sanitizeEmail($email);
 		}
-		if($name) $this->mail['replyToName'] = $this->sanitizeHeaderValue($name); 
+		if($name) $this->replyToName($name); 
 		$this->mail['replyTo'] = $email;
-		if(empty($name) && !empty($this->mail['replyToName'])) $name = $this->mail['replyToName']; 
-		if(strlen($name)) $email = $this->bundleEmailAndName($email, $name); 
-		$this->header('Reply-To', $email); 
 		return $this; 
 	}
 
@@ -401,7 +404,6 @@ class WireMail extends WireData implements WireMailInterface {
 	 * 
 	 */
 	public function replyToName($name) {
-		if(strlen($this->mail['replyTo'])) return $this->replyTo($this->mail['replyTo'], $name); 
 		$this->mail['replyToName'] = $this->sanitizeHeaderValue($name);
 		return $this; 
 	}
@@ -605,14 +607,14 @@ class WireMail extends WireData implements WireMailInterface {
 		foreach($this->param as $value) {
 			$param .= " $value";
 		}
-
+		
 		// send email(s)
 		$numSent = 0;
 		$subject = $this->encodeSubject($this->subject);
 		
 		foreach($this->to as $to) {
 			$toName = isset($this->mail['toName'][$to]) ? $this->mail['toName'][$to] : '';
-			if($toName) $to = $this->bundleEmailAndName($to, $toName); // bundle to "User Name <user@example.com>"
+			if($toName) $to = $this->bundleEmailAndName($to, $toName, 'To'); // bundle to "User Name <user@example.com>"
 			if($param) {
 				if(@mail($to, $subject, $body, $header, $param)) $numSent++;
 			} else {
@@ -635,13 +637,19 @@ class WireMail extends WireData implements WireMailInterface {
 		$settings = $config->wireMail;
 		$from = $this->from;
 		$fromName = $this->fromName;
+		$replyTo = $this->mail['replyTo'];
+		$replyToName = $this->mail['replyToName'];
 		
 		if(!strlen($from) && !empty($settings['from'])) $from = $settings['from'];
 		if(!strlen($from)) $from = $config->adminEmail;
 		if(!strlen($from)) $from = 'processwire@' . $config->httpHost;
 		if(!strlen($fromName) && !empty($settings['fromName'])) $fromName = $settings['fromName'];
 		
-		$header = "From: " . ($fromName ? $this->bundleEmailAndName($from, $fromName) : $from);
+		$header = "From: " . ($fromName ? $this->bundleEmailAndName($from, $fromName, 'From') : $from);
+
+		if(strlen($replyTo)) {
+			$header .= "\r\nReply-To: " . ($replyToName ? $this->bundleEmailAndName($replyTo, $replyToName, 'Reply-To') : $replyTo);
+		}
 
 		foreach($this->header as $key => $value) {
 			$header .= "\r\n$key: $value";
@@ -825,28 +833,46 @@ class WireMail extends WireData implements WireMailInterface {
 	 */
 	public function encodeSubject($subject) {
 		
+		return $this->encodeRfc2822Header('Subject', $subject);
+	}
+	
+	
+	/**
+	 * Encode a mail header, use mbstring if available
+	 * 
+	 * #pw-advanced
+	 *
+	 * @param string $hdrname
+	 * @param string $text
+	 * @return string
+	 *
+	 */
+	public function encodeRfc2822Header($hdrname, $text, $asString = true) {
+		
 		$boundary = $this->multipartBoundary();
-		$subject = $this->strReplace($subject, $boundary);
+		$text = $this->strReplace($text, $boundary);
 		
 		if(extension_loaded("mbstring")) {
 			// Need to pass in the header name and subtract it afterwards,
 			// otherwise the first line would grow too long
-			return substr(mb_encode_mimeheader("Subject: $subject", 'UTF-8', 'Q', "\r\n"), 9);
+			$hdr = mb_substr(mb_encode_mimeheader("$hdrname: $text", 'UTF-8', 'Q', "\r\n", 5), strlen($hdrname)  + 2);
+			return $asString ? $hdr : explode("\r\n", $hdr);
 		}
 
 		$out = array();
 		$isFirst = true;
 		$n = 0;
 
-		while(strlen($subject) > 0 && ++$n < 50) {
+		while(strlen($text) > 0 && ++$n < 50) {
 			$part = $this->findBestEncodePart($subject, 63, $isFirst);
 			$out[] = $this->quotedPrintableString($part);
-			$subject = substr($subject, strlen($part));
+			$text = substr($text, strlen($part));
 			$isFirst = false;
 		}
 		
-		return implode("\r\n ", $out);
+		return $asString ? implode("\r\n ", $out) : $out;
 	}
+	
 	
 	/**
 	 * Tries to split the passed subject at a whitespace at or before $maxlen,
